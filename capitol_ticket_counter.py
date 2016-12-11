@@ -1,6 +1,6 @@
-# HAODS ticket counter
+# Ticket counter
 # For monitoring ticket sales from the Horsham Capitol via their Spektrix driven website
-# Copyright Tom Hounsham 2016
+# Copyright Bisxuit 2016
 # v0.2 2016-12-07
 
 import sys
@@ -23,7 +23,7 @@ from PyQt4.QtWebKit import *
 class production():
 	def __init__(self,config_file):
 		self.config_file = config_file
-		self.log_file = config_file.replace(".conf","log")
+		self.log_file = config_file.replace(".conf",".log")
 		#self.timestamp = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M")
 		self.tickets_sold = 0
 		self.tickets_available = 0
@@ -74,8 +74,8 @@ class production():
 			
 	def update(self):
 		s = screenshot()
-		folder = "/home/tom/Code/Tickets/"
-		#folder = tempfile.gettempdir()
+		#folder = "/home/tom/Code/Tickets/"
+		folder = tempfile.gettempdir()
 		self.timestamp = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M")
 		
 		self.tickets_sold = 0
@@ -253,33 +253,20 @@ class screenshot(QWebView):
 
 
 
-def email():
-	folder = "/home/tom/Code/Tickets/"
-	log = read_log(folder+"ticket.log")
-	
-	old_seats = log[-2][17:]
-	seats = log[-1][17:]
-	
-	# Look for changes
-	if seats==old_seats:
-		exit
-	else:
-		process = subprocess.Popen(['mail', '-s', 'Tickets sold','phantomtanton@gmail.com'],stdin=subprocess.PIPE)
-		process.communicate(log[-2]+'\n'+log[-1])
-
-
-
 def main(config_file,command):
 	if command == "update":
 		p = production(config_file)
 		p.update()
 		print p.pprint()
+		p.write_log()
 	elif command == "help":
 		print "Usage is: python capitol_ticket_counter.py <config_file> [<action>]"
 		print "Actions are: update, help, email, setup"
 	elif command == "email":
+		# TODO - check log for changes and email an update
 		pass
 	elif command == "setup":
+		# TODO - wizard for choosing events
 		pass
 	else:
 		print "Command line option not recognised: "+command

@@ -24,7 +24,6 @@ class production():
 	def __init__(self,config_file):
 		self.config_file = config_file
 		self.log_file = config_file.replace(".conf",".log")
-		#self.timestamp = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M")
 		self.tickets_sold = 0
 		self.tickets_available = 0
 		self.read_config()
@@ -74,8 +73,7 @@ class production():
 			
 	def update(self):
 		s = screenshot()
-		#folder = "/home/tom/Code/Tickets/"
-		folder = tempfile.gettempdir()
+		folder = tempfile.gettempdir()+"/"
 		self.timestamp = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M")
 		
 		self.tickets_sold = 0

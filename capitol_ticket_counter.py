@@ -6,8 +6,10 @@
 import sys
 import time
 import tempfile
-import datetime
+from datetime import datetime
 import os
+from copy import deepcopy
+import subprocess
 
 # For pixel counting
 from PIL import Image
@@ -26,8 +28,10 @@ class production():
 		self.log_file = config_file.replace(".conf",".log")
 		self.tickets_sold = 0
 		self.tickets_available = 0
+		self.email = ''
 		self.read_config()
-		
+		self.change = 0
+		self.time_change = 0
 		
 	def read_config(self):
 		# Get the list of events for this production from text file defined on the command line
@@ -38,6 +42,8 @@ class production():
 					continue
 				elif line[0]=="#":
 					self.title=line[1:].strip()
+				elif line[0]=="@":
+					self.email = line[1:].strip()
 				else:
 					try:
 						temp_desc = line.split(",")[0].strip()
@@ -54,48 +60,101 @@ class production():
 			sys.exit()
 	
 	
-	def pprint(self):
+	def pprint(self,show_changes = True):
 		output_text = self.title
-		output_text += "\n"+datetime.datetime.now().strftime("%Y-%m-%d %A %H:%M")
+		if self.time_change<>0 and show_changes:
+			output_text += "\n"+datetime.strftime(self.timestamp,"%Y-%m-%d %A %H:%M") + "  (in last "+str(self.time_change)+")"
+		else:
+			output_text += "\n"+datetime.strftime(self.timestamp,"%Y-%m-%d %A %H:%M") # Slightly more human readable than ISO8601
+		
 		for e in self.performances:
-			output_text += "\n  "+e.desc+": "+str(e.tickets_sold) #(+x)
-		output_text += "\n\nTotal sales: "+str(self.tickets_sold)
+			if e.change<>0 and show_changes:
+				output_text += "\n  "+e.desc+": "+str(e.tickets_sold) +"  ("+"%+d"%e.change+")"
+			else:
+				output_text += "\n  "+e.desc+": "+str(e.tickets_sold)
+				
+		if self.change<>0 and show_changes:
+			output_text += "\n\nTotal sales: "+str(self.tickets_sold)+"  ("+"%+d"%self.change+")"
+		else:
+			output_text += "\n\nTotal sales: "+str(self.tickets_sold)
 		return output_text
 	
-	
-	def csv_print(self):
-		output_text = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M")
+					
+	def write_log(self):
+		output_text = datetime.strftime(self.timestamp,"%Y-%m-%dT%H:%M") # ISO8601
 		for e in self.performances:
 			output_text += ","+str(e.tickets_sold)
 		output_text += ","+str(self.tickets_sold)
-		return output_text
-			
-			
+		
+		with open(self.log_file,'a') as fid:
+			fid.write(output_text+'\n')
+
+						
 	def update(self):
 		s = screenshot()
 		folder = tempfile.gettempdir()+"/"
-		self.timestamp = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M")
+		self.timestamp = datetime.now()
 		
 		self.tickets_sold = 0
 		self.tickets_available = 0
+		some_failed = False
 		
 		for e in self.performances:
-			e.get_sales(s,folder,self.timestamp)
-			# Add up each performance
-			self.tickets_sold += e.tickets_sold
-			self.tickets_available += e.tickets_available
-		
+			if e.get_sales(s,folder):
+				# Add up each performance
+				self.tickets_sold += e.tickets_sold
+				self.tickets_available += e.tickets_available
 				
-	def write_log(self):
-		with open(self.log_file,'a') as fid:
-			fid.write(self.csv_print()+'\n')
-	
+			else:
+				# Failed
+				some_failed = True
+				
+		if some_failed:
+			return 0
+		else:
+			return 1
 		
-	def read_log(self):
+		
+	def read_last_log(self):
 		with open(self.log_file,'rt') as fid:
-			return fid.readlines()
+			# Read last two lines from file
+			temp = tail(fid,2)
 		
-				
+		if len(temp)<2:
+			print "Not enough data"
+			return 0
+			
+		then = temp[0].split(',')
+		now = temp[1].split(',')
+		
+		self.timestamp = datetime.strptime(now[0],"%Y-%m-%dT%H:%M")
+		self.time_change = self.timestamp - datetime.strptime(then[0],"%Y-%m-%dT%H:%M")
+		i = 1
+		for e in self.performances:
+			e.tickets_sold = int(now[i])
+			e.change = int(now[i])-int(then[i])
+			i+=1
+
+		self.tickets_sold = int(now[i])
+		self.change = int(now[i])-int(then[i])
+		if self.change==0:
+			return 0
+		else:
+			return 1
+	
+	
+	def send_email(self,email="",show_changes = True):
+		if email<>"":
+			if show_changes:
+				subject = 'Ticket sales: %d  (%+d)' % (self.tickets_sold,self.change)
+			else:
+				subject = 'Ticket sales: %d'%self.tickets_sold
+			process = subprocess.Popen(['mail', '-s', subject,email],stdin=subprocess.PIPE)
+			process.communicate(self.pprint(show_changes))
+		else:
+			print self.pprint(show_changes)
+		
+		
 			
 # Performance class for a single event on the Spektrix system (e.g. "Wednesday night of Dream")
 class performance:
@@ -105,11 +164,12 @@ class performance:
 		self.url = "https://system.spektrix.com/capitolhorsham/website/ChooseSeats.aspx?EventInstanceId="+self.id
 		self.tickets_available = 0
 		self.tickets_sold = 0
+		self.change = 0
 
 	
-	def get_sales(self,s,folder,timestamp):
-		# Get a screenshot of the webpage
-		filename = folder+timestamp+"_"+self.desc+"_"+self.id+".png"
+	def get_sales(self,s,folder):
+		# Get a screenshot of the webpage (to temp file, so not bothered about overwriting/readability)
+		filename = folder+self.id+".png"
 		# This can poo to stdout
 		s.capture(self.url,filename)
 		
@@ -180,13 +240,9 @@ class performance:
 		# Circle (max)  = 112
 		# Theatre (max) = 421
 		if seats_total<>421:
-			# Keep the picture for later analysis (could be sold out, or event passed)
-			# TODO - check timestamp against event time from Spektrix
-			print "Unexpected number of seats: "+seats_total+ " for: "+self.desc+" "+timestamp
-		else:
-			pass
-			#i.delete()
-			
+			print "Unexpected number of seats: "+str(seats_total)+ " for: "+self.desc
+			return 0
+					
 		# However, not all seats are available for sale (and this is not entirely predictably)
 		# Front three rows out (pit used) = 47
 		# Sound desk in auditorium (musicals) = 12
@@ -194,7 +250,7 @@ class performance:
 		# These numbers should be calibrated against the official printouts from the Capitol
 		# This will also tell you how many complimentary tickets are included.		
 		
-		# Comment out appropriate lines here
+		# Comment out appropriate lines here - TODO, put in config
 		# For a musical
 		unavailable_seats = 47+12+15
 		
@@ -212,6 +268,7 @@ class performance:
 		self.tickets_sold = 421 - unavailable_seats - seats_stalls_unsold - seats_circle_unsold
 		
 		i.close()
+		return 1
 	
 				
 
@@ -251,21 +308,72 @@ class screenshot(QWebView):
 
 
 
-def main(config_file,command):
+# Helper function
+def tail(f, window=20):
+	# Returns the last `window` lines of file `f` as a list.
+    if window == 0:
+        return []
+    BUFSIZ = 1024
+    f.seek(0, 2)
+    bytes = f.tell()
+    size = window + 1
+    block = -1
+    data = []
+    while size > 0 and bytes > 0:
+        if bytes - BUFSIZ > 0:
+            # Seek back one whole BUFSIZ
+            f.seek(block * BUFSIZ, 2)
+            # read BUFFER
+            data.insert(0, f.read(BUFSIZ))
+        else:
+            # file too small, start from begining
+            f.seek(0,0)
+            # only read what was not read
+            data.insert(0, f.read(bytes))
+        linesFound = data[0].count('\n')
+        size -= linesFound
+        bytes -= BUFSIZ
+        block -= 1
+    return ''.join(data).splitlines()[-window:]
+
+
+
+def main(config_file,email="",command ="update"):
 	if command == "update":
 		p = production(config_file)
-		p.update()
-		print p.pprint()
-		p.write_log()
-	elif command == "help":
-		print "Usage is: python capitol_ticket_counter.py <config_file> [<action>]"
-		print "Actions are: update, help, email, setup"
-	elif command == "email":
-		# TODO - check log for changes and email an update
-		pass
+		if p.update():
+			p.write_log()
+			main(config_file,email,"changes")
+		else:
+			# Failed
+			pass
+		
+	elif command == "summary":
+		# Output latest totals, but without changes since last update
+		p = production(config_file)
+		p.read_last_log()
+		p.send_email(email,False)
+				
+	elif command == "changes":	
+		# Output latest totals, but only if changes have happened since last update
+		p = production(config_file)
+		if p.read_last_log():
+			p.send_email(email,True)
+				
 	elif command == "setup":
 		# TODO - wizard for choosing events
 		pass
+
+	elif command == "help":
+		print "Usage is: python capitol_ticket_counter.py <config_file> [<email_address>] [<action>]"
+		print "Actions are:"
+		print "  update      :  Check current ticket sales and update log"
+		print "  summary     :  Send regular update email (e.g. daily)"
+		print "  changes	 :  Send email if any changes between last two updates"
+		print "  plot        :  Produce graph of ticket sales over time from log"
+		print "  help        :  Print this text"
+
+	
 	else:
 		print "Command line option not recognised: "+command
 		
@@ -273,9 +381,11 @@ def main(config_file,command):
 		
 # Logic to sort out command line options
 if __name__ == '__main__':
-	if len(sys.argv)>2:
+	if len(sys.argv)>3:
+		main(sys.argv[1],sys.argv[2],sys.argv[3])
+	elif len(sys.argv)>2:
 		main(sys.argv[1],sys.argv[2])
 	elif len(sys.argv)>1:
-		main(sys.argv[1],'update')
+		main(sys.argv[1])
 	else:
-		main('dagenham.conf','update')
+		main('dagenham.conf')

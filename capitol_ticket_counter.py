@@ -1,7 +1,9 @@
 # Ticket counter
 # For monitoring ticket sales from the Horsham Capitol via their Spektrix driven website
-# Copyright Bisxuit 2016
-# v0.2 2016-12-07
+# Copyright Bisxuit 2017-08-18
+
+# TODO - better error checking, especially crap network connections
+# TODO - Cloudify into AWS
 
 import sys
 import time
@@ -12,7 +14,7 @@ from copy import deepcopy
 import subprocess
 
 # For pixel counting
-from PIL import Image
+from PIL import Image,ImageChops
 
 # For screenshots of web pages
 from PyQt4.QtCore import *
@@ -26,6 +28,8 @@ class production():
 	def __init__(self,config_file):
 		self.config_file = config_file
 		self.log_file = config_file.replace(".conf",".log")
+		# TODO - error check here
+		self.reference_image = Image.open(config_file.replace(".conf",".png"))
 		self.tickets_sold = 0
 		self.tickets_available = 0
 		self.email = ''
@@ -91,7 +95,6 @@ class production():
 
 						
 	def update(self):
-		s = screenshot()
 		folder = tempfile.gettempdir()+"/"
 		self.timestamp = datetime.now()
 		
@@ -100,7 +103,7 @@ class production():
 		some_failed = False
 		
 		for e in self.performances:
-			if e.get_sales(s,folder):
+			if e.get_sales(folder,self.reference_image):
 				# Add up each performance
 				self.tickets_sold += e.tickets_sold
 				self.tickets_available += e.tickets_available
@@ -144,6 +147,9 @@ class production():
 	
 	
 	def send_email(self,email="",show_changes = True):
+		if email=="" and self.email<>"":
+			email = self.email
+			
 		if email<>"":
 			if show_changes:
 				subject = 'Ticket sales: %d  (%+d)' % (self.tickets_sold,self.change)
@@ -167,16 +173,21 @@ class performance:
 		self.change = 0
 
 	
-	def get_sales(self,s,folder):
+	def get_sales(self,folder,reference_image):
 		# Get a screenshot of the webpage (to temp file, so not bothered about overwriting/readability)
-		filename = folder+self.id+".png"
+		filename = folder+datetime.strftime(datetime.now(),"%Y-%m-%d_%H:%M")+"_"+self.id+".png"
 		# This can poo to stdout
-		s.capture(self.url,filename)
+		screenshot(self.url,filename)
 		
 		# Crop all the extra crap out
 		i = Image.open(filename)
-		i = i.crop((160,420,800,960))
+		i = i.crop((90,400,900,1060))
+		
+		# Remove various elements from picture that aren't seats using reference image
+		i = ImageChops.add(ImageChops.invert(reference_image), i)
+		
 		i.save(filename)
+
 		
 		# Count sold seats
 		pixels_circle_unsold = 0
@@ -184,9 +195,11 @@ class performance:
 		pixels_stalls_unsold = 0
 		pixels_stalls = 0
 				
-		divider = 200 #pixels
+		# These bits may need recalibrating for website/theatre changes
+		divider = 280 #pixels
+		pixels_per_seat = 170.0
 		
-		# Count the circle, 200 pixels down from the top
+		# Count the circle, 280 pixels down from the top
 		for x in range(i.size[0]):
 			for y in range(0,divider):
 				p = i.getpixel((x,y)) #RGB
@@ -213,25 +226,13 @@ class performance:
 					pixels_stalls_unsold+=1
 		
 		i.close()
-
-		 
-		# Now remove various elements from picture that aren't seats
-		# See https://system.spektrix.com/capitolhorsham/files/Theatre__8f80dc6e71e744afa0e17b9dbde8c2dd.gif
-		
-		# Remove purple divider between circle and stalls (only background bit with colour)
-		pixels_circle_unsold += -1483
-		pixels_stalls_unsold += -327
-		
-		# Remove divider, writing and other crap (black and grey)
-		pixels_circle += -715
-		pixels_stalls += -3191
-		
-		# Convert pixels to seats (109 pixels per blob)
+	
+		# Convert pixels to seats (170 pixels per blob)
 		# Should result in integers, but round anyway
-		seats_circle = int(round(pixels_circle/109.0))
-		seats_circle_unsold = int(round(pixels_circle_unsold/109.0))
-		seats_stalls = int(round(pixels_stalls/109.0))
-		seats_stalls_unsold = int(round(pixels_stalls_unsold/109.0))
+		seats_circle = int(round(pixels_circle/pixels_per_seat))
+		seats_circle_unsold = int(round(pixels_circle_unsold/pixels_per_seat))
+		seats_stalls = int(round(pixels_stalls/pixels_per_seat))
+		seats_stalls_unsold = int(round(pixels_stalls_unsold/pixels_per_seat))
 		
 		seats_total = seats_circle + seats_stalls
 		
@@ -241,8 +242,9 @@ class performance:
 		# Theatre (max) = 421
 		if seats_total<>421:
 			print "Unexpected number of seats: "+str(seats_total)+ " for: "+self.desc
+			seats_total = float('nan')
 			return 0
-					
+		
 		# However, not all seats are available for sale (and this is not entirely predictably)
 		# Front three rows out (pit used) = 47
 		# Sound desk in auditorium (musicals) = 12
@@ -263,6 +265,7 @@ class performance:
 			unavailable_seats += 112
 			self.tickets_available = seats_stalls_unsold
 		else:
+			unavailable_seats += 5 #reserved in the circle
 			self.tickets_available = seats_stalls_unsold + seats_circle_unsold
 				
 		self.tickets_sold = 421 - unavailable_seats - seats_stalls_unsold - seats_circle_unsold
@@ -270,42 +273,12 @@ class performance:
 		i.close()
 		return 1
 	
-				
-
-class screenshot(QWebView):
-    def __init__(self):
-		self.app = QApplication(sys.argv)
-		QWebView.__init__(self)
-		self._loaded = False
-		self.loadFinished.connect(self._loadFinished)
-		
-
-    def capture(self, url, output_file):
-		self.load(QUrl(url))
-		self.wait_load()
-		# Set to webpage size
-		frame = self.page().mainFrame()
-		self.page().setViewportSize(frame.contentsSize())
-		# Render image
-		image = QImage(self.page().viewportSize(), QImage.Format_ARGB32)
-		painter = QPainter(image)
-		frame.render(painter)
-		painter.end()
-		# Print 'saving', output_file
-		image.save(output_file)
-
-
-    def wait_load(self, delay=0):
-        # Process app events until page loaded
-        while not self._loaded:
-            self.app.processEvents()
-            time.sleep(delay)
-        self._loaded = False
-
-
-    def _loadFinished(self, result):
-        self._loaded = True
-
+	
+def screenshot(url, output_file):
+	# Call Linux function from command line to get screenshot of webpage
+	FNULL = open(os.devnull, 'w')
+	process = subprocess.Popen(["wkhtmltoimage",url,output_file],stdin=subprocess.PIPE,stdout=FNULL,stderr=subprocess.STDOUT)
+	process.wait()
 
 
 # Helper function
@@ -339,7 +312,11 @@ def tail(f, window=20):
 
 
 def main(config_file,email="",command ="update"):
+	# Various different options here. 
+	
 	if command == "update":
+		# Default is to run a full update and email changes if an email address is in the config file or on the command line.
+		# This is the best option for running updates (e.g. called from cron every fifteen minutes)
 		p = production(config_file)
 		if p.update():
 			p.write_log()
@@ -349,20 +326,27 @@ def main(config_file,email="",command ="update"):
 			pass
 		
 	elif command == "summary":
-		# Output latest totals, but without changes since last update
+		# Output latest totals, but without including changes since last update (e.g. for a weekly update)
 		p = production(config_file)
 		p.read_last_log()
 		p.send_email(email,False)
 				
-	elif command == "changes":	
+	elif command == "changes":
 		# Output latest totals, but only if changes have happened since last update
+		# This will go as an email if address is included in the config file or command line
 		p = production(config_file)
 		if p.read_last_log():
 			p.send_email(email,True)
 				
 	elif command == "setup":
-		# TODO - wizard for choosing events
+		# TODO - wizard for choosing events, reference image and output email address
 		pass
+
+	elif command == "plot":
+		# Create a graph of ticket sales
+		p = production(config_file)
+		# TODO
+		# TODO - compare to previous shows for which data exists
 
 	elif command == "help":
 		print "Usage is: python capitol_ticket_counter.py <config_file> [<email_address>] [<action>]"

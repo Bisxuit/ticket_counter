@@ -16,12 +16,6 @@ import subprocess
 # For pixel counting
 from PIL import Image,ImageChops
 
-# For screenshots of web pages
-from PyQt4.QtCore import *
-from PyQt4.QtGui import *
-from PyQt4.QtWebKit import *
-
-
 
 # Production class for a set of performances (e.g. "A Midsummer Night's Dream")
 class production():
@@ -33,9 +27,10 @@ class production():
 		self.tickets_sold = 0
 		self.tickets_available = 0
 		self.email = ''
-		self.read_config()
+		self.reference_time = 1
 		self.change = 0
 		self.time_change = 0
+		self.read_config()
 		
 	def read_config(self):
 		# Get the list of events for this production from text file defined on the command line
@@ -48,6 +43,10 @@ class production():
 					self.title=line[1:].strip()
 				elif line[0]=="@":
 					self.email = line[1:].strip()
+				elif line[0]=="+":
+					# Force the end time to 2200 on the final day specified in the text file.
+					# TODO - sanitise input (only used for plotting at the moment)
+					self.reference_time = datetime.strptime(line[1:].strip()+" 22:00","%Y-%m-%d %H:%M")
 				else:
 					try:
 						temp_desc = line.split(",")[0].strip()

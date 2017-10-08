@@ -12,6 +12,8 @@ from datetime import datetime
 import os
 from copy import deepcopy
 import subprocess
+import csv
+
 
 # For pixel counting
 from PIL import Image,ImageChops
@@ -82,6 +84,50 @@ class production():
 			output_text += "\n\nTotal sales: "+str(self.tickets_sold)
 		return output_text
 	
+	
+	def get_history(self,days = 100):
+		from collections import defaultdict
+		
+		a = defaultdict(list) # each value in each column is appended to a list
+
+		fieldnames = ['date']
+		for perf in self.performances:
+			fieldnames.append(perf.desc) # or ID?	
+		fieldnames.append('Total')
+			
+		t_log = 15 # minutes (defined in cron job) TODO - work out from log
+		n_lines = days*24*60/t_log
+		with open(self.log_file) as f:
+			data = tail(f,n_lines)
+			
+		reader = csv.DictReader(data, fieldnames) # read rows
+			
+		for row in reader: # read a row as {column1: value1, column2: value2,...}
+			for (k,v) in row.items(): # go over each column name and value
+				if k=='date':
+					a[k].append(datetime.strptime(v,"%Y-%m-%dT%H:%M"))
+					a['tminus'].append((datetime.strptime(v,"%Y-%m-%dT%H:%M")-self.reference_time).total_seconds()//(60*60*24))
+				else:
+					a[k].append(v) # append the value into the appropriate list based on column name k
+	
+		self.history=a
+		self.timestamp = datetime.now()
+	
+	
+	def get_total(self,show_changes = False):
+		if self.change<>0 and show_changes:
+			return str(self.tickets_sold) + " ("+"%+d"%self.change+")"
+		else:
+			return str(self.tickets_sold)
+	
+	
+	def get_change(self):
+		return self.change
+	
+		
+	def get_show_name(self):
+		return self.title
+					
 					
 	def write_log(self):
 		output_text = datetime.strftime(self.timestamp,"%Y-%m-%dT%H:%M") # ISO8601
@@ -117,7 +163,7 @@ class production():
 			return 1
 		
 		
-	def read_last_log(self):
+	def read_log(self):
 		with open(self.log_file,'rt') as fid:
 			# Read last two lines from file
 			temp = tail(fid,2)
@@ -145,16 +191,16 @@ class production():
 			return 1
 	
 	
-	def send_email(self,email="",show_changes = True):
-		if email=="" and self.email<>"":
-			email = self.email
-			
-		if email<>"":
+	def send_email(self,show_changes = True,filename=""):
+		if self.email<>"":
 			if show_changes:
 				subject = 'Ticket sales: %d  (%+d)' % (self.tickets_sold,self.change)
 			else:
 				subject = 'Ticket sales: %d'%self.tickets_sold
-			process = subprocess.Popen(['mail', '-s', subject,email],stdin=subprocess.PIPE)
+			if filename<>"":
+				process = subprocess.Popen(['mail','-A',filename,'-s', subject,self.email],stdin=subprocess.PIPE)
+			else:
+				process = subprocess.Popen(['mail', '-s', subject,self.email],stdin=subprocess.PIPE)
 			process.communicate(self.pprint(show_changes))
 		else:
 			print self.pprint(show_changes)
@@ -272,11 +318,12 @@ class performance:
 		i.close()
 		return 1
 	
-	
+
 def screenshot(url, output_file):
 	# Call Linux function from command line to get screenshot of webpage
+	# -a option opens new display if previous instance has frozen
 	FNULL = open(os.devnull, 'w')
-	process = subprocess.Popen(["wkhtmltoimage",url,output_file],stdin=subprocess.PIPE,stdout=FNULL,stderr=subprocess.STDOUT)
+	process = subprocess.Popen(["xvfb-run","-a","wkhtmltoimage",url,output_file],stdin=subprocess.PIPE,stdout=FNULL,stderr=subprocess.STDOUT)
 	process.wait()
 
 
@@ -309,8 +356,61 @@ def tail(f, window=20):
     return ''.join(data).splitlines()[-window:]
 
 
+def plot_sales(config_file,compare=False,send_email = True,days = 100):
+	import matplotlib
+	matplotlib.use('Agg')
+	import matplotlib.pyplot as plt
+	
+	# Plot ticket sales, includes option to include previous shows
+	p1 = production(config_file)
+	p1.read_log()
+	p1.get_history(days)
+	if compare:
+		p2 = production('/home/pi/code/Tickets/dagenham.conf') # only current (nearly) complete dataset TODO - define in config
+		p2.get_history()
+		
+	fig,ax = plt.subplots()
 
-def main(config_file,email="",command ="update"):
+	# Plot data (TODO - bin anything from show week)
+	if days==100:
+		l1, = ax.plot(p1.history['tminus'],p1.history['Total'],'b.-',label=p1.title)
+	else:
+		l1, = ax.plot(p1.history['date'],p1.history['Total'],'b.-',label=p1.title)
+	
+	if compare:
+		l2, = ax.plot(p2.history['tminus'],p2.history['Total'],'r:',label=p2.title)
+
+	ax.grid()
+	ax.set_title(p1.title+" - "+datetime.strftime(p1.timestamp,"%A %Y-%m-%d"))
+	
+	if compare:
+		ax.legend(handles=[l1,l2],loc="upper left")
+	if days==100:
+		ax.set_xlabel('Days until closing night')
+	else:
+		fig.autofmt_xdate()
+	ax.set_ylabel('Seats filled')
+	
+	ax.autoscale(enable=True, axis='x', tight=True)
+	xmin, xmax = ax.get_xlim()   # return the current xlim
+	if days==100:
+		#ax.set_xlim( (xmin, -6) )  # limit to the week before closing night (because counter currently breaks when the show starts)
+		ax.set_xlim( (-100, -6) ) 
+	#ax.set_ylim( (0, 600) )  # artificial limit
+			
+	folder = tempfile.gettempdir()+"/"
+	filename = folder+p1.title.replace(" ","_")+"_"+datetime.strftime(datetime.now(),"%Y-%m-%d_%H-%M")+".png"
+	
+	plt.savefig(filename,bbox_inches='tight',dpi=200)
+	
+	if send_email:
+		p1.send_email(False,filename)
+	else:
+		print filename
+	
+
+
+def main(config_file,command ="update"):
 	# Various different options here. 
 	
 	if command == "update":
@@ -319,7 +419,7 @@ def main(config_file,email="",command ="update"):
 		p = production(config_file)
 		if p.update():
 			p.write_log()
-			main(config_file,email,"changes")
+			main(config_file,"changes")
 		else:
 			# Failed
 			pass
@@ -327,26 +427,33 @@ def main(config_file,email="",command ="update"):
 	elif command == "summary":
 		# Output latest totals, but without including changes since last update (e.g. for a weekly update)
 		p = production(config_file)
-		p.read_last_log()
-		p.send_email(email,False)
+		p.read_log()
+		p.send_email(False)
 				
 	elif command == "changes":
 		# Output latest totals, but only if changes have happened since last update
 		# This will go as an email if address is included in the config file or command line
 		p = production(config_file)
-		if p.read_last_log():
-			p.send_email(email,True)
+		if p.read_log():
+			p.send_email(True)
 				
 	elif command == "setup":
 		# TODO - wizard for choosing events, reference image and output email address
 		pass
 
 	elif command == "plot":
-		# Create a graph of ticket sales
-		p = production(config_file)
-		# TODO
-		# TODO - compare to previous shows for which data exists
-
+		# Create a graph of ticket sales (and email)
+		plot_sales(config_file,compare=False)
+		
+	elif command == "compare":
+		# Create a graph of ticket sales with comparison to previous show
+		plot_sales(config_file,compare=True)
+		
+	elif command == "plotday":
+		# Create a graph of ticket sales with comparison to previous show
+		plot_sales(config_file,compare = False,send_email = False,days = 7)
+				
+						
 	elif command == "help":
 		print "Usage is: python capitol_ticket_counter.py <config_file> [<email_address>] [<action>]"
 		print "Actions are:"
@@ -371,4 +478,4 @@ if __name__ == '__main__':
 	elif len(sys.argv)>1:
 		main(sys.argv[1])
 	else:
-		main('dagenham.conf')
+		main('eastwick.conf')
